@@ -1,13 +1,13 @@
 //+------------------------------------------------------------------+
-//|                                                  GoldMTF_EA.mq4  |
-//|   Gold (XAUUSD) Expert Advisor for MetaTrader 4                  |
+//|                                              EURUSD_MTF_EA.mq4   |
+//|   EURUSD Expert Advisor for MetaTrader 4                         |
 //|   M15 = trend direction  |  M5 = entry timing                    |
 //|   Lot size calculated from a fixed % risk per trade              |
 //+------------------------------------------------------------------+
 #property copyright "AUT"
 #property version   "1.00"
 #property strict
-#property description "Gold multi-timeframe EA: M15 trend filter + M5 entries."
+#property description "EURUSD multi-timeframe EA: M15 trend filter + M5 entries."
 #property description "Position size is calculated so that a stop-loss hit loses RiskPercent of the account."
 #property description "Trading is risky. Test on a demo account first."
 
@@ -38,6 +38,7 @@ input double   RSISellMax           = 50.0;   // ...and RSI <= this
 input string   InpExitHeader        = "===== Stop loss / take profit =====";  // ----------
 input int      ATRPeriod            = 14;     // ATR period (on M15)
 input double   StopLossATR          = 1.5;    // Stop loss = ATR(M15) x this
+input double   MinStopPips          = 8.0;    // Minimum stop loss in pips (avoids tiny stops in quiet hours)
 input double   RewardRisk           = 2.0;    // Take profit = stop distance x this (R:R)
 input double   BreakEvenAtR         = 1.0;    // Move SL to break-even at this many R profit (0 = off)
 input double   BreakEvenLockR       = 0.1;    // ...locking in this many R
@@ -46,17 +47,17 @@ input double   TrailATR             = 1.0;    // Trailing distance = ATR(M15) x 
 input bool     CloseOnOpposite      = false;  // Close a trade on an opposite M5 signal
 
 input string   InpFilterHeader      = "===== Filters =====";  // ----------
-input double   MaxSpreadPrice       = 0.60;   // Max spread in price units ($0.60 on gold)
+input double   MaxSpreadPips        = 2.0;    // Max spread in pips
 input int      StartHour            = 7;      // Trading start hour (broker server time)
 input int      EndHour              = 20;     // Trading end hour (broker server time)
 input bool     AvoidFridayLate      = true;   // No new trades late on Friday
 input int      FridayEndHour        = 18;     // Friday cut-off hour (server time)
 
 input string   InpOrderHeader       = "===== Orders =====";  // ----------
-input int      MagicNumber          = 515151; // Magic number (unique per chart)
+input int      MagicNumber          = 616161; // Magic number (unique per chart)
 input int      SlippagePoints       = 30;     // Max slippage (points)
 input bool     ECNMode              = false;  // ECN broker: send order first, then add SL/TP
-input string   TradeComment         = "GoldMTF"; // Order comment
+input string   TradeComment         = "EURUSD_MTF"; // Order comment
 input bool     ShowPanel            = true;   // Show info panel on chart
 
 //============================ GLOBALS ==============================
@@ -65,28 +66,32 @@ string   g_gvDayKey   = "";
 string   g_gvDayBal   = "";
 string   g_status     = "Starting...";
 
+// 1 pip = 0.0001 on EURUSD (10 points on 5-digit brokers, 1 point on 4-digit)
+double Pip() { return (Digits == 3 || Digits == 5) ? Point * 10 : Point; }
+string Px(double v) { return DoubleToString(v, Digits); }
+
 //+------------------------------------------------------------------+
 int OnInit()
 {
    if(RiskPercent <= 0 || RiskPercent > 50)
-   { Alert("GoldMTF: RiskPercent must be between 0 and 50."); return INIT_PARAMETERS_INCORRECT; }
+   { Alert("EURUSD_MTF: RiskPercent must be between 0 and 50."); return INIT_PARAMETERS_INCORRECT; }
    if(StopLossATR <= 0 || RewardRisk <= 0 || ATRPeriod <= 0)
-   { Alert("GoldMTF: StopLossATR, RewardRisk and ATRPeriod must be > 0."); return INIT_PARAMETERS_INCORRECT; }
+   { Alert("EURUSD_MTF: StopLossATR, RewardRisk and ATRPeriod must be > 0."); return INIT_PARAMETERS_INCORRECT; }
    if(EntryFastEMA >= EntrySlowEMA || TrendFastEMA >= TrendSlowEMA)
-   { Alert("GoldMTF: fast EMA periods must be smaller than slow EMA periods."); return INIT_PARAMETERS_INCORRECT; }
+   { Alert("EURUSD_MTF: fast EMA periods must be smaller than slow EMA periods."); return INIT_PARAMETERS_INCORRECT; }
    if(MaxOpenTrades < 1)
-   { Alert("GoldMTF: MaxOpenTrades must be at least 1."); return INIT_PARAMETERS_INCORRECT; }
+   { Alert("EURUSD_MTF: MaxOpenTrades must be at least 1."); return INIT_PARAMETERS_INCORRECT; }
 
    string sym = Symbol();
    StringToUpper(sym);
-   if(StringFind(sym, "XAU") < 0 && StringFind(sym, "GOLD") < 0)
-      Print("GoldMTF WARNING: this EA is designed for gold, but it is attached to ", Symbol());
+   if(StringFind(sym, "EURUSD") < 0)
+      Print("EURUSD_MTF WARNING: this EA is designed for EURUSD, but it is attached to ", Symbol());
 
-   g_gvDayKey = "GoldMTF_" + Symbol() + "_" + IntegerToString(MagicNumber) + "_day";
-   g_gvDayBal = "GoldMTF_" + Symbol() + "_" + IntegerToString(MagicNumber) + "_bal";
+   g_gvDayKey = "EURUSD_MTF_" + Symbol() + "_" + IntegerToString(MagicNumber) + "_day";
+   g_gvDayBal = "EURUSD_MTF_" + Symbol() + "_" + IntegerToString(MagicNumber) + "_bal";
    UpdateDailyAnchor();
 
-   PrintFormat("GoldMTF started on %s | risk %.2f%% per trade | SL %.1fxATR(M15) | R:R 1:%.1f",
+   PrintFormat("EURUSD_MTF started on %s | risk %.2f%% per trade | SL %.1fxATR(M15) | R:R 1:%.1f",
                Symbol(), RiskPercent, StopLossATR, RewardRisk);
    return INIT_SUCCEEDED;
 }
@@ -170,7 +175,7 @@ void ProcessNewBar()
    if(signal != trend)  { g_status = "M5 signal against M15 trend - skipped"; return; }
 
    string reason = "";
-   if(!CanOpenNewTrade(reason)) { g_status = reason; Print("GoldMTF: signal skipped - ", reason); return; }
+   if(!CanOpenNewTrade(reason)) { g_status = reason; Print("EURUSD_MTF: signal skipped - ", reason); return; }
 
    if(OpenTrade(signal)) g_status = (signal > 0 ? "BUY opened" : "SELL opened");
 }
@@ -180,7 +185,7 @@ bool CanOpenNewTrade(string &reason)
    if(!IsTradeAllowed())                  { reason = "Trading not allowed (enable AutoTrading)"; return false; }
    if(CountOpenTrades() >= MaxOpenTrades) { reason = "Max open trades reached"; return false; }
    if(DailyLossHit())                     { reason = "Daily loss limit hit - paused until tomorrow"; return false; }
-   if(Ask - Bid > MaxSpreadPrice)         { reason = StringFormat("Spread too wide (%.2f)", Ask - Bid); return false; }
+   if(Ask - Bid > MaxSpreadPips * Pip()) { reason = StringFormat("Spread too wide (%.1f pips)", (Ask - Bid) / Pip()); return false; }
    if(!InSession())                       { reason = "Outside trading hours"; return false; }
    return true;
 }
@@ -209,7 +214,7 @@ double CalcLots(double slDist)
    double maxLot     = MarketInfo(Symbol(), MODE_MAXLOT);
 
    if(tickValue <= 0 || tickSize <= 0 || lotStep <= 0 || slDist <= 0)
-   { Print("GoldMTF: invalid symbol info, cannot size position."); return 0; }
+   { Print("EURUSD_MTF: invalid symbol info, cannot size position."); return 0; }
 
    double lossPerLot = (slDist / tickSize) * tickValue + CommissionPerLot;
    double lots = riskMoney / lossPerLot;
@@ -220,7 +225,7 @@ double CalcLots(double slDist)
 
    if(lots < minLot)
    {
-      PrintFormat("GoldMTF: account too small for this stop. Need %.2f lots but minimum is %.2f "
+      PrintFormat("EURUSD_MTF: account too small for this stop. Need %.2f lots but minimum is %.2f "
                   "(would risk %.2f instead of %.2f). Trade skipped.",
                   lots, minLot, minLot * lossPerLot, riskMoney);
       return 0;
@@ -270,9 +275,9 @@ bool IsRetryable(int err)
 bool OpenTrade(int dir)
 {
    double atr = iATR(NULL, PERIOD_M15, ATRPeriod, 1);
-   if(atr <= 0) { Print("GoldMTF: ATR not available."); return false; }
+   if(atr <= 0) { Print("EURUSD_MTF: ATR not available."); return false; }
 
-   double slDist  = atr * StopLossATR;
+   double slDist  = MathMax(atr * StopLossATR, MinStopPips * Pip());
    double minDist = (MarketInfo(Symbol(), MODE_STOPLEVEL) + 1) * Point + (Ask - Bid);
    if(slDist < minDist) slDist = minDist;
    double tpDist  = slDist * RewardRisk;
@@ -284,7 +289,7 @@ bool OpenTrade(int dir)
 
    ResetLastError();
    if(AccountFreeMarginCheck(Symbol(), type, lots) <= 0 || GetLastError() == ERR_NOT_ENOUGH_MONEY)
-   { PrintFormat("GoldMTF: not enough free margin for %.2f lots.", lots); return false; }
+   { PrintFormat("EURUSD_MTF: not enough free margin for %.2f lots.", lots); return false; }
 
    for(int attempt = 1; attempt <= 3; attempt++)
    {
@@ -304,12 +309,12 @@ bool OpenTrade(int dir)
       if(ticket > 0)
       {
          if(ECNMode) AttachStops(ticket, slDist, tpDist);
-         PrintFormat("GoldMTF: %s %.2f lots @ %.2f  SL %.2f  TP %.2f  (risk %.2f%%)",
-                     type == OP_BUY ? "BUY" : "SELL", lots, price, sl, tp, RiskPercent);
+         PrintFormat("EURUSD_MTF: %s %.2f lots @ %s  SL %s  TP %s  (stop %.1f pips, risk %.2f%%)",
+                     type == OP_BUY ? "BUY" : "SELL", lots, Px(price), Px(sl), Px(tp), slDist / Pip(), RiskPercent);
          return true;
       }
       int err = GetLastError();
-      PrintFormat("GoldMTF: OrderSend failed (attempt %d): error %d", attempt, err);
+      PrintFormat("EURUSD_MTF: OrderSend failed (attempt %d): error %d", attempt, err);
       if(!IsRetryable(err)) break;
       Sleep(500);
    }
@@ -329,7 +334,7 @@ void AttachStops(int ticket, double slDist, double tpDist)
       Sleep(500);
       RefreshRates();
    }
-   Alert("GoldMTF WARNING: could not set SL/TP on ticket #", ticket, " - set them manually!");
+   Alert("EURUSD_MTF WARNING: could not set SL/TP on ticket #", ticket, " - set them manually!");
 }
 
 void CloseTrades(int typeToClose)
@@ -341,7 +346,7 @@ void CloseTrades(int typeToClose)
       RefreshRates();
       double price = (typeToClose == OP_BUY) ? Bid : Ask;
       if(!OrderClose(OrderTicket(), OrderLots(), NormalizeDouble(price, Digits), SlippagePoints, clrYellow))
-         PrintFormat("GoldMTF: OrderClose #%d failed: error %d", OrderTicket(), GetLastError());
+         PrintFormat("EURUSD_MTF: OrderClose #%d failed: error %d", OrderTicket(), GetLastError());
    }
 }
 
@@ -411,7 +416,7 @@ void ManageOpenTrades()
 void ModifySL(int ticket, double open, double newSL, double tp)
 {
    if(!OrderModify(ticket, open, newSL, tp, 0, clrNONE))
-      PrintFormat("GoldMTF: OrderModify #%d failed: error %d", ticket, GetLastError());
+      PrintFormat("EURUSD_MTF: OrderModify #%d failed: error %d", ticket, GetLastError());
 }
 
 //========================== PANEL ==================================
@@ -420,16 +425,16 @@ void DrawPanel()
 {
    int    trend    = HistoryReady() ? TrendDirection() : 0;
    double atr      = iATR(NULL, PERIOD_M15, ATRPeriod, 1);
-   double slDist   = atr * StopLossATR;
+   double slDist   = MathMax(atr * StopLossATR, MinStopPips * Pip());
    double base     = RiskOnEquity ? AccountEquity() : AccountBalance();
    string trendTxt = trend > 0 ? "UP (buys only)" : (trend < 0 ? "DOWN (sells only)" : "NONE (no trades)");
 
    string txt = "";
-   txt += "=== GoldMTF EA ===\n";
-   txt += StringFormat("Symbol: %s   Spread: %.2f\n", Symbol(), Ask - Bid);
+   txt += "=== EURUSD_MTF EA ===\n";
+   txt += StringFormat("Symbol: %s   Spread: %.1f pips\n", Symbol(), (Ask - Bid) / Pip());
    txt += StringFormat("M15 trend: %s\n", trendTxt);
    txt += StringFormat("Risk/trade: %.2f%% = %.2f %s\n", RiskPercent, base * RiskPercent / 100.0, AccountCurrency());
-   txt += StringFormat("Next SL distance: %.2f  (ATR M15 %.2f)\n", slDist, atr);
+   txt += StringFormat("Next SL distance: %.1f pips  (ATR M15 %.1f pips)\n", slDist / Pip(), atr / Pip());
    txt += StringFormat("Open trades: %d / %d\n", CountOpenTrades(), MaxOpenTrades);
    txt += StringFormat("Daily loss limit: %s\n", DailyLossHit() ? "HIT - paused" : "OK");
    txt += "Status: " + g_status;
