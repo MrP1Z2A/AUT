@@ -87,8 +87,12 @@ int OnInit()
    if(StringFind(sym, "EURUSD") < 0)
       Print("EURUSD_MTF WARNING: this EA is designed for EURUSD, but it is attached to ", Symbol());
 
-   g_gvDayKey = "EURUSD_MTF_" + Symbol() + "_" + IntegerToString(MagicNumber) + "_day";
-   g_gvDayBal = "EURUSD_MTF_" + Symbol() + "_" + IntegerToString(MagicNumber) + "_bal";
+   // Separate keys per account and for the Strategy Tester, so a backtest can't
+   // overwrite the live account's daily starting balance (MT4 shares global variables).
+   string gvBase = "EURUSD_MTF_" + (IsTesting() ? "TEST_" : "") + IntegerToString(AccountNumber()) + "_" +
+                   Symbol() + "_" + IntegerToString(MagicNumber);
+   g_gvDayKey = gvBase + "_day";
+   g_gvDayBal = gvBase + "_bal";
    UpdateDailyAnchor();
 
    PrintFormat("EURUSD_MTF started on %s | risk %.2f%% per trade | SL %.1fxATR(M15) | R:R 1:%.1f",
@@ -250,6 +254,13 @@ bool DailyLossHit()
    if(MaxDailyLossPercent <= 0) return false;
    double startBal = GlobalVariableGet(g_gvDayBal);
    if(startBal <= 0) return false;
+   // Safety: a stored balance far above today's balance can't be a real intraday loss
+   // (e.g. stale value or a withdrawal) - re-anchor instead of blocking trading.
+   if(AccountBalance() < startBal * 0.5)
+   {
+      GlobalVariableSet(g_gvDayBal, AccountBalance());
+      return false;
+   }
    return AccountEquity() <= startBal * (1.0 - MaxDailyLossPercent / 100.0);
 }
 
