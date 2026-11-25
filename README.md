@@ -16,12 +16,20 @@ Both use two timeframes:
 
 Each trade risks **5% of the account** (you can change this). The lot size is calculated from the stop-loss distance, so a stop-loss hit loses about 5%.
 
+## Long and short
+Both bots trade **both directions**:
+- **Long (BUY)** when the M15 trend is **UP** and EMA 9 crosses **above** EMA 21 on M5.
+- **Short (SELL)** when the M15 trend is **DOWN** and EMA 9 crosses **below** EMA 21 on M5.
+
+On the gold bot, `TradeDirection` can limit it to longs only or shorts only.
+
 ## Gold vs EURUSD differences
 | Setting | XAUUSD bot | EURUSD bot |
 |---------|-----------|------------|
 | Max spread | `MaxSpreadPrice` = $0.60 | `MaxSpreadPips` = 2 pips |
 | Minimum stop loss | `MinStopPrice` = $3.00 | `MinStopPips` = 8 pips |
 | Small-account option | `AllowMinLotOverRisk` (see below) | not needed |
+| Direction choice | `TradeDirection`: long + short (default), long only, short only | always long + short |
 
 ### ⚠️ Gold and small accounts
 One standard gold lot is 100 oz, so a $1 move = **$100 per lot** (0.01 lot = $1 per $1 move).
@@ -59,7 +67,7 @@ To trade small accounts anyway, set `AllowMinLotOverRisk = true`. The bot then u
 
 > Open the M5 and M15 charts of the symbol once so MT4 downloads their history.
 
-## Watching the bot in real time (EURUSD bot v1.10)
+## Watching the bots in real time (both bots, v1.10)
 **Live panel on the chart.** It updates every second:
 - A green ✔ or red ✘ for each trade condition: M15 trend, M5 EMA cross, RSI, spread, trading hours, daily loss limit and trade slots. A trade opens when all 7 are green on a new M5 candle.
 - The open trade with its live P/L, the size of the next trade, a countdown to the next M5 check, and the last event.
