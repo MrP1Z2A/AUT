@@ -5,7 +5,7 @@
 //|   close as soon as the trade shows a small $ profit.             |
 //+------------------------------------------------------------------+
 #property copyright "AUT"
-#property version   "1.00"
+#property version   "1.10"
 #property strict
 #property description "Gold (XAUUSD) momentum scalper. Watches price tick by tick: a sudden surge up opens a LONG,"
 #property description "a sudden drop opens a SHORT. Closes as soon as the trade is TakeProfitMoney in profit."
@@ -21,9 +21,9 @@ enum ENUM_TRADE_DIR
 //============================ INPUTS ===============================
 input string   InpEntryHeader       = "===== Surge entry (real time) =====";  // ----------
 input ENUM_TRADE_DIR TradeDirection = DIR_BOTH; // Trade direction
-input int      SurgeSeconds         = 60;     // Look-back window for a surge (seconds)
-input double   SurgeATR             = 1.5;    // Surge = move of at least ATR(M1) x this ...
-input double   MinSurgePrice        = 1.50;   // ... and at least this many $ of gold price
+input int      SurgeSeconds         = 10;     // Look-back window for a surge (seconds)
+input double   SurgeATR             = 0.6;    // Surge = move of at least ATR(M1) x this ...
+input double   MinSurgePrice        = 1.00;   // ... and at least this many $ of gold price
 input double   SurgeHoldPct         = 70.0;   // Price must still be near the extreme of the move (%)
 input int      ATRPeriod            = 14;     // ATR period (M1)
 input bool     UseTrendFilter       = false;  // Only trade in the direction of the M5 trend

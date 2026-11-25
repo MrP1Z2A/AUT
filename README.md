@@ -21,7 +21,7 @@ A separate fast bot for gold. It doesn't wait for candles: it watches **every pr
 
 | What | How |
 |------|-----|
-| **Go LONG** | Gold jumps **up** by at least 1.5 × ATR(M1) (and at least $1.50) within 60 seconds, and price is still near the top |
+| **Go LONG** | Gold jumps **up** by at least 0.6 × ATR(M1) (and at least $1.00) within **10 seconds**, and price is still near the top |
 | **Go SHORT** | Gold drops **down** the same way, and price is still near the bottom |
 | **Take profit** | Closes **as soon as the trade is +$2.00 in profit** (`TakeProfitMoney`). A broker-side TP sits at the same level |
 | **Break-even** | At +$1.00 profit the stop moves to the entry price |
