@@ -5,7 +5,7 @@
 //|   Lot size calculated from a fixed % risk per trade              |
 //+------------------------------------------------------------------+
 #property copyright "AUT"
-#property version   "1.00"
+#property version   "1.10"
 #property strict
 #property description "EURUSD multi-timeframe EA: M15 trend filter + M5 entries."
 #property description "Position size is calculated so that a stop-loss hit loses RiskPercent of the account."
@@ -58,17 +58,37 @@ input int      MagicNumber          = 616161; // Magic number (unique per chart)
 input int      SlippagePoints       = 30;     // Max slippage (points)
 input bool     ECNMode              = false;  // ECN broker: send order first, then add SL/TP
 input string   TradeComment         = "EURUSD_MTF"; // Order comment
-input bool     ShowPanel            = true;   // Show info panel on chart
+input bool     ShowPanel            = true;   // Show live info panel on chart
+
+input string   InpAlertHeader       = "===== Alerts =====";  // ----------
+input bool     PushNotifications    = true;   // Send alerts to the MT4 phone app (needs MetaQuotes ID)
+input bool     PopupAlerts          = false;  // Also show a pop-up alert window on the PC
 
 //============================ GLOBALS ==============================
 datetime g_lastM5Bar  = 0;
 string   g_gvDayKey   = "";
 string   g_gvDayBal   = "";
 string   g_status     = "Starting...";
+string   g_lastEvent  = "-";
+int      g_known[];              // tickets open on the previous tick (to detect closed trades)
+datetime g_pauseNotified = 0;    // day we last sent the "daily limit hit" alert
+int      g_srvOffset  = 0;       // server time - local time, keeps the countdown ticking between ticks
+
+#define PFX "EMTF_"
 
 // 1 pip = 0.0001 on EURUSD (10 points on 5-digit brokers, 1 point on 4-digit)
 double Pip() { return (Digits == 3 || Digits == 5) ? Point * 10 : Point; }
 string Px(double v) { return DoubleToString(v, Digits); }
+
+// Log an event, show it on the panel and (optionally) push it to the phone app
+void Notify(string msg)
+{
+   Print("EURUSD_MTF: ", msg);
+   g_lastEvent = TimeToString(TimeCurrent(), TIME_MINUTES) + "  " + msg;
+   if(IsTesting()) return;
+   if(PushNotifications) SendNotification("EURUSD_MTF: " + msg);
+   if(PopupAlerts) Alert("EURUSD_MTF: " + msg);
+}
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -95,21 +115,33 @@ int OnInit()
    g_gvDayBal = gvBase + "_bal";
    UpdateDailyAnchor();
 
-   PrintFormat("EURUSD_MTF started on %s | risk %.2f%% per trade | SL %.1fxATR(M15) | R:R 1:%.1f",
-               Symbol(), RiskPercent, StopLossATR, RewardRisk);
+   SnapshotOpenTickets(g_known);
+   g_srvOffset = (int)(TimeCurrent() - TimeLocal());
+   EventSetTimer(1);              // refresh the panel every second, even without new ticks
+   Notify(StringFormat("Bot started on %s, risk %.1f%% per trade, balance %.2f %s",
+                       Symbol(), RiskPercent, AccountBalance(), AccountCurrency()));
    return INIT_SUCCEEDED;
 }
 
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+   EventKillTimer();
+   ObjectsDeleteAll(0, PFX);
    Comment("");
+}
+
+void OnTimer()
+{
+   if(ShowPanel) { RefreshRates(); DrawPanel(); }
 }
 
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   g_srvOffset = (int)(TimeCurrent() - TimeLocal());
    UpdateDailyAnchor();
+   CheckClosedTrades();
    ManageOpenTrades();
 
    datetime m5Bar = iTime(NULL, PERIOD_M5, 0);
@@ -181,14 +213,20 @@ void ProcessNewBar()
    string reason = "";
    if(!CanOpenNewTrade(reason)) { g_status = reason; Print("EURUSD_MTF: signal skipped - ", reason); return; }
 
-   if(OpenTrade(signal)) g_status = (signal > 0 ? "BUY opened" : "SELL opened");
+   if(OpenTrade(signal)) { g_status = (signal > 0 ? "BUY opened" : "SELL opened"); SnapshotOpenTickets(g_known); }
 }
 
 bool CanOpenNewTrade(string &reason)
 {
    if(!IsTradeAllowed())                  { reason = "Trading not allowed (enable AutoTrading)"; return false; }
    if(CountOpenTrades() >= MaxOpenTrades) { reason = "Max open trades reached"; return false; }
-   if(DailyLossHit())                     { reason = "Daily loss limit hit - paused until tomorrow"; return false; }
+   if(DailyLossHit())
+   {
+      reason = "Daily loss limit hit - paused until tomorrow";
+      datetime today = iTime(NULL, PERIOD_D1, 0);
+      if(g_pauseNotified != today) { g_pauseNotified = today; Notify("Daily loss limit hit - no new trades until tomorrow"); }
+      return false;
+   }
    if(Ask - Bid > MaxSpreadPips * Pip()) { reason = StringFormat("Spread too wide (%.1f pips)", (Ask - Bid) / Pip()); return false; }
    if(!InSession())                       { reason = "Outside trading hours"; return false; }
    return true;
@@ -207,7 +245,7 @@ bool InSession()
 //========================== RISK ===================================
 
 // Lot size so that hitting a stop of 'slDist' (price units) loses RiskPercent of the account
-double CalcLots(double slDist)
+double CalcLots(double slDist, bool quiet = false)
 {
    double base       = RiskOnEquity ? AccountEquity() : AccountBalance();
    double riskMoney  = base * RiskPercent / 100.0;
@@ -218,7 +256,7 @@ double CalcLots(double slDist)
    double maxLot     = MarketInfo(Symbol(), MODE_MAXLOT);
 
    if(tickValue <= 0 || tickSize <= 0 || lotStep <= 0 || slDist <= 0)
-   { Print("EURUSD_MTF: invalid symbol info, cannot size position."); return 0; }
+   { if(!quiet) Print("EURUSD_MTF: invalid symbol info, cannot size position."); return 0; }
 
    double lossPerLot = (slDist / tickSize) * tickValue + CommissionPerLot;
    double lots = riskMoney / lossPerLot;
@@ -229,7 +267,7 @@ double CalcLots(double slDist)
 
    if(lots < minLot)
    {
-      PrintFormat("EURUSD_MTF: account too small for this stop. Need %.2f lots but minimum is %.2f "
+      if(!quiet) PrintFormat("EURUSD_MTF: account too small for this stop. Need %.2f lots but minimum is %.2f "
                   "(would risk %.2f instead of %.2f). Trade skipped.",
                   lots, minLot, minLot * lossPerLot, riskMoney);
       return 0;
@@ -320,13 +358,13 @@ bool OpenTrade(int dir)
       if(ticket > 0)
       {
          if(ECNMode) AttachStops(ticket, slDist, tpDist);
-         PrintFormat("EURUSD_MTF: %s %.2f lots @ %s  SL %s  TP %s  (stop %.1f pips, risk %.2f%%)",
-                     type == OP_BUY ? "BUY" : "SELL", lots, Px(price), Px(sl), Px(tp), slDist / Pip(), RiskPercent);
+         Notify(StringFormat("%s %.2f lots opened @ %s  SL %s  TP %s  (%.1f pips, risk %.1f%%)",
+                type == OP_BUY ? "BUY" : "SELL", lots, Px(price), Px(sl), Px(tp), slDist / Pip(), RiskPercent));
          return true;
       }
       int err = GetLastError();
       PrintFormat("EURUSD_MTF: OrderSend failed (attempt %d): error %d", attempt, err);
-      if(!IsRetryable(err)) break;
+      if(!IsRetryable(err)) { Notify(StringFormat("Order FAILED, error %d (see Experts tab)", err)); break; }
       Sleep(500);
    }
    return false;
@@ -346,6 +384,7 @@ void AttachStops(int ticket, double slDist, double tpDist)
       RefreshRates();
    }
    Alert("EURUSD_MTF WARNING: could not set SL/TP on ticket #", ticket, " - set them manually!");
+   Notify(StringFormat("WARNING: no SL/TP on ticket #%d - set them manually!", ticket));
 }
 
 void CloseTrades(int typeToClose)
@@ -402,7 +441,11 @@ void ManageOpenTrades()
          }
          newSL = NormalizeDouble(newSL, Digits);
          if(newSL >= sl + minStep && Bid - newSL > stopLevel)
-            ModifySL(OrderTicket(), open, newSL, tp);
+         {
+            bool toBE = (sl < open && newSL >= open);
+            if(ModifySL(OrderTicket(), open, newSL, tp) && toBE)
+               Notify(StringFormat("BUY #%d stop moved to break-even (%s)", OrderTicket(), Px(newSL)));
+         }
       }
       else
       {
@@ -419,36 +462,212 @@ void ManageOpenTrades()
          }
          newSL = NormalizeDouble(newSL, Digits);
          if(newSL > 0 && (sl == 0 || newSL <= sl - minStep) && newSL - Ask > stopLevel)
-            ModifySL(OrderTicket(), open, newSL, tp);
+         {
+            bool toBE = ((sl == 0 || sl > open) && newSL <= open);
+            if(ModifySL(OrderTicket(), open, newSL, tp) && toBE)
+               Notify(StringFormat("SELL #%d stop moved to break-even (%s)", OrderTicket(), Px(newSL)));
+         }
       }
    }
 }
 
-void ModifySL(int ticket, double open, double newSL, double tp)
+bool ModifySL(int ticket, double open, double newSL, double tp)
 {
-   if(!OrderModify(ticket, open, newSL, tp, 0, clrNONE))
-      PrintFormat("EURUSD_MTF: OrderModify #%d failed: error %d", ticket, GetLastError());
+   if(OrderModify(ticket, open, newSL, tp, 0, clrNONE)) return true;
+   PrintFormat("EURUSD_MTF: OrderModify #%d failed: error %d", ticket, GetLastError());
+   return false;
+}
+
+//========================== TRADE TRACKING =========================
+
+void SnapshotOpenTickets(int &arr[])
+{
+   ArrayResize(arr, 0);
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) continue;
+      if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber || OrderType() > OP_SELL) continue;
+      int n = ArraySize(arr);
+      ArrayResize(arr, n + 1);
+      arr[n] = OrderTicket();
+   }
+}
+
+// Detect trades that closed since the last tick (SL, TP, manual) and report the result
+void CheckClosedTrades()
+{
+   int cur[];
+   SnapshotOpenTickets(cur);
+   for(int k = 0; k < ArraySize(g_known); k++)
+   {
+      bool stillOpen = false;
+      for(int j = 0; j < ArraySize(cur); j++) if(cur[j] == g_known[k]) { stillOpen = true; break; }
+      if(stillOpen) continue;
+      if(!OrderSelect(g_known[k], SELECT_BY_TICKET) || OrderCloseTime() == 0) continue;
+      double pl = OrderProfit() + OrderSwap() + OrderCommission();
+      Notify(StringFormat("%s #%d CLOSED %s%.2f %s @ %s - balance now %.2f",
+             OrderType() == OP_BUY ? "BUY" : "SELL", OrderTicket(), pl >= 0 ? "+" : "", pl,
+             AccountCurrency(), Px(OrderClosePrice()), AccountBalance()));
+   }
+   ArrayResize(g_known, ArraySize(cur));
+   for(int i = 0; i < ArraySize(cur); i++) g_known[i] = cur[i];
 }
 
 //========================== PANEL ==================================
+// Live checklist: a trade opens when every line with a tick/cross is green
+// (the M5 cross line turns green only on the candle where a fresh cross happens).
+
+#define P_X     10      // panel position (pixels from the top-left corner)
+#define P_Y     95      // below MT4's one-click trading box
+#define P_W     520
+#define P_ROW   17
+
+void PLabel(string name, int x, int y, string text, color clr, int size = 9, string font = "Consolas")
+{
+   string n = PFX + name;
+   if(ObjectFind(0, n) < 0)
+   {
+      ObjectCreate(0, n, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, n, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, n, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, n, OBJPROP_HIDDEN, true);
+   }
+   ObjectSetInteger(0, n, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, n, OBJPROP_YDISTANCE, y);
+   ObjectSetString(0, n, OBJPROP_TEXT, text == "" ? " " : text);
+   ObjectSetString(0, n, OBJPROP_FONT, font);
+   ObjectSetInteger(0, n, OBJPROP_FONTSIZE, size);
+   ObjectSetInteger(0, n, OBJPROP_COLOR, clr);
+}
+
+void PBox(int h)
+{
+   string n = PFX + "bg";
+   if(ObjectFind(0, n) < 0)
+   {
+      ObjectCreate(0, n, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, n, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, n, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, n, OBJPROP_HIDDEN, true);
+      ObjectSetInteger(0, n, OBJPROP_BGCOLOR, C'18,22,30');
+      ObjectSetInteger(0, n, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+      ObjectSetInteger(0, n, OBJPROP_COLOR, clrDimGray);
+      ObjectSetInteger(0, n, OBJPROP_XDISTANCE, P_X);
+      ObjectSetInteger(0, n, OBJPROP_YDISTANCE, P_Y);
+      ObjectSetInteger(0, n, OBJPROP_XSIZE, P_W);
+   }
+   ObjectSetInteger(0, n, OBJPROP_YSIZE, h);
+}
+
+// state: 1 = OK (green tick), 0 = blocking (red cross), -1 = info (grey dot)
+void PRow(int row, int state, string title, string value)
+{
+   int y = P_Y + 30 + row * P_ROW;
+   string icon = state == 1 ? CharToStr(252) : (state == 0 ? CharToStr(251) : CharToStr(159));
+   color  ic   = state == 1 ? clrLimeGreen : (state == 0 ? clrTomato : clrGray);
+   PLabel("i" + IntegerToString(row), P_X + 8,  y, icon, ic, 10, "Wingdings");
+   PLabel("t" + IntegerToString(row), P_X + 28, y, title, clrSilver);
+   if(StringLen(value) > 52) value = StringSubstr(value, 0, 50) + "..";
+   PLabel("v" + IntegerToString(row), P_X + 150, y, value, state == 0 ? clrTomato : clrWhite);
+}
 
 void DrawPanel()
 {
-   int    trend    = HistoryReady() ? TrendDirection() : 0;
-   double atr      = iATR(NULL, PERIOD_M15, ATRPeriod, 1);
-   double slDist   = MathMax(atr * StopLossATR, MinStopPips * Pip());
-   double base     = RiskOnEquity ? AccountEquity() : AccountBalance();
-   string trendTxt = trend > 0 ? "UP (buys only)" : (trend < 0 ? "DOWN (sells only)" : "NONE (no trades)");
+   bool ready = HistoryReady();
+   int  trend = ready ? TrendDirection() : 0;
+   int  row   = 0;
 
-   string txt = "";
-   txt += "=== EURUSD_MTF EA ===\n";
-   txt += StringFormat("Symbol: %s   Spread: %.1f pips\n", Symbol(), (Ask - Bid) / Pip());
-   txt += StringFormat("M15 trend: %s\n", trendTxt);
-   txt += StringFormat("Risk/trade: %.2f%% = %.2f %s\n", RiskPercent, base * RiskPercent / 100.0, AccountCurrency());
-   txt += StringFormat("Next SL distance: %.1f pips  (ATR M15 %.1f pips)\n", slDist / Pip(), atr / Pip());
-   txt += StringFormat("Open trades: %d / %d\n", CountOpenTrades(), MaxOpenTrades);
-   txt += StringFormat("Daily loss limit: %s\n", DailyLossHit() ? "HIT - paused" : "OK");
-   txt += "Status: " + g_status;
-   Comment(txt);
+   // --- header
+   bool canTrade = IsTradeAllowed() && IsExpertEnabled();
+   PBox(30 + 15 * P_ROW + 8);
+   PLabel("hdr", P_X + 8, P_Y + 6, "EURUSD_MTF EA", clrWhite, 11, "Arial Bold");
+   PLabel("run", P_X + 150, P_Y + 8,
+          canTrade ? "RUNNING - live " + (IsDemo() ? "(DEMO)" : "(REAL MONEY)") : "AUTOTRADING OFF",
+          canTrade ? clrLimeGreen : clrTomato, 9, "Arial Bold");
+
+   // --- 1. M15 trend
+   double adx = iADX(NULL, PERIOD_M15, ADXPeriod, PRICE_CLOSE, MODE_MAIN, 1);
+   string tv;
+   if(!ready)          tv = "loading history...";
+   else if(trend > 0)  tv = StringFormat("UP - looking for BUYS (ADX %.0f)", adx);
+   else if(trend < 0)  tv = StringFormat("DOWN - looking for SELLS (ADX %.0f)", adx);
+   else if(MinADX > 0 && adx < MinADX) tv = StringFormat("NONE - too weak (ADX %.0f < %.0f)", adx, MinADX);
+   else                tv = "NONE - EMAs mixed";
+   PRow(row++, trend != 0 ? 1 : 0, "M15 trend", tv);
+
+   // --- 2. M5 EMA cross (on the last closed candle)
+   double f1 = iMA(NULL, PERIOD_M5, EntryFastEMA, 0, MODE_EMA, PRICE_CLOSE, 1);
+   double s1 = iMA(NULL, PERIOD_M5, EntrySlowEMA, 0, MODE_EMA, PRICE_CLOSE, 1);
+   double f2 = iMA(NULL, PERIOD_M5, EntryFastEMA, 0, MODE_EMA, PRICE_CLOSE, 2);
+   double s2 = iMA(NULL, PERIOD_M5, EntrySlowEMA, 0, MODE_EMA, PRICE_CLOSE, 2);
+   bool crossUp = (f2 <= s2 && f1 > s1), crossDn = (f2 >= s2 && f1 < s1);
+   double gap = (f1 - s1) / Pip();
+   string cv; bool crossOK = false;
+   if((trend > 0 && crossUp) || (trend < 0 && crossDn)) { cv = "FRESH CROSS in trend direction!"; crossOK = true; }
+   else if(trend > 0) cv = gap > 0 ? StringFormat("EMA%d above by %.1f p - wait for new cross UP", EntryFastEMA, gap)
+                                   : StringFormat("EMA%d below by %.1f p - wait for cross UP", EntryFastEMA, -gap);
+   else if(trend < 0) cv = gap < 0 ? StringFormat("EMA%d below by %.1f p - wait for new cross DOWN", EntryFastEMA, -gap)
+                                   : StringFormat("EMA%d above by %.1f p - wait for cross DOWN", EntryFastEMA, gap);
+   else cv = StringFormat("EMA%d %s EMA%d by %.1f p", EntryFastEMA, gap >= 0 ? "above" : "below", EntrySlowEMA, MathAbs(gap));
+   PRow(row++, crossOK ? 1 : 0, StringFormat("M5 EMA %d/%d", EntryFastEMA, EntrySlowEMA), cv);
+
+   // --- 3. RSI
+   double rsi = iRSI(NULL, PERIOD_M5, RSIPeriod, PRICE_CLOSE, 1);
+   bool rsiOK = trend > 0 ? (rsi >= RSIBuyMin && rsi <= RSIBuyMax)
+              : trend < 0 ? (rsi >= RSISellMin && rsi <= RSISellMax) : false;
+   string rv = trend > 0 ? StringFormat("%.1f  (buy needs %.0f-%.0f)", rsi, RSIBuyMin, RSIBuyMax)
+             : trend < 0 ? StringFormat("%.1f  (sell needs %.0f-%.0f)", rsi, RSISellMin, RSISellMax)
+             : StringFormat("%.1f", rsi);
+   PRow(row++, rsiOK ? 1 : 0, "M5 RSI", rv);
+
+   // --- 4-7. filters
+   double spread = (Ask - Bid) / Pip();
+   PRow(row++, spread <= MaxSpreadPips ? 1 : 0, "Spread", StringFormat("%.1f pips  (max %.1f)", spread, MaxSpreadPips));
+
+   datetime srv = TimeLocal() + g_srvOffset;
+   PRow(row++, InSession() ? 1 : 0, "Trading hours",
+        StringFormat("%s server  (%02d:00-%02d:00)", TimeToString(srv, TIME_MINUTES), StartHour, EndHour));
+
+   bool dl = DailyLossHit();
+   PRow(row++, dl ? 0 : 1, "Daily loss limit", dl ? "HIT - paused until tomorrow" : StringFormat("OK  (limit %.0f%%)", MaxDailyLossPercent));
+
+   int open = CountOpenTrades();
+   PRow(row++, open < MaxOpenTrades ? 1 : 0, "Trade slots", StringFormat("%d / %d open", open, MaxOpenTrades));
+
+   // --- open trade details
+   string ot = "none";
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) continue;
+      if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber || OrderType() > OP_SELL) continue;
+      double pl = OrderProfit() + OrderSwap() + OrderCommission();
+      ot = StringFormat("%s %.2f @ %s  P/L %s%.2f", OrderType() == OP_BUY ? "BUY" : "SELL",
+                        OrderLots(), Px(OrderOpenPrice()), pl >= 0 ? "+" : "", pl);
+      break;
+   }
+   PRow(row++, -1, "Open trade", ot);
+
+   // --- risk preview
+   double atr    = iATR(NULL, PERIOD_M15, ATRPeriod, 1);
+   double slDist = MathMax(atr * StopLossATR, MinStopPips * Pip());
+   double base   = RiskOnEquity ? AccountEquity() : AccountBalance();
+   double lots   = CalcLots(slDist, true);
+   PRow(row++, -1, "Next trade", lots > 0
+        ? StringFormat("%.2f lots, SL %.1f p, TP %.1f p", lots, slDist / Pip(), slDist * RewardRisk / Pip())
+        : "account too small for minimum lot");
+   PRow(row++, -1, "Risk / trade", StringFormat("%.1f%% = %.2f %s  (balance %.2f)",
+        RiskPercent, base * RiskPercent / 100.0, AccountCurrency(), AccountBalance()));
+
+   // --- timing + status
+   datetime m5 = iTime(NULL, PERIOD_M5, 0);
+   int left = (int)(m5 + 300 - srv);
+   if(left < 0) left = 0;
+   PRow(row++, -1, "Next M5 check", StringFormat("in %d:%02d", left / 60, left % 60));
+   PRow(row++, -1, "Status", g_status);
+   PRow(row++, -1, "Last event", g_lastEvent);
+   PLabel("foot", P_X + 8, P_Y + 30 + row * P_ROW + 2,
+          "A trade opens when the first 7 lines are all green on a new M5 candle.", clrGray, 8, "Arial");
+
+   ChartRedraw();
 }
 //+------------------------------------------------------------------+
