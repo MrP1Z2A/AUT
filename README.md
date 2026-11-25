@@ -16,6 +16,24 @@ Both use two timeframes:
 
 Each trade risks **5% of the account** (you can change this). The lot size is calculated from the stop-loss distance, so a stop-loss hit loses about 5%.
 
+## ⚡ XAUUSD Scalper (`MQL4/Experts/XAUUSD_Scalper_EA.mq4`, magic 717171)
+A separate fast bot for gold. It doesn't wait for candles: it watches **every price tick**.
+
+| What | How |
+|------|-----|
+| **Go LONG** | Gold jumps **up** by at least 1.5 × ATR(M1) (and at least $1.50) within 60 seconds, and price is still near the top |
+| **Go SHORT** | Gold drops **down** the same way, and price is still near the bottom |
+| **Take profit** | Closes **as soon as the trade is +$2.00 in profit** (`TakeProfitMoney`). A broker-side TP sits at the same level |
+| **Break-even** | At +$1.00 profit the stop moves to the entry price |
+| **Stop loss** | Always set: 2 × ATR(M1), at least $2. Skips the trade if the stop would be wider than $8 |
+| **Time limit** | Closes any trade after 10 minutes, win or lose |
+| **Safety** | 1 trade at a time, 30 s cooldown, pauses 30 min after 3 losses in a row, max 40 trades a day, stops for the day at −10%, max spread $0.40 |
+
+The live panel shows the size of the current surge against the size needed, the open trade's P/L against the target, and today's trades, wins and P/L.
+
+⚠️ **The maths of tiny targets:** each win is about **$2**, but a stop loss costs about **$3–8**. The bot needs to win roughly **3 out of 4 trades** just to break even, and the spread takes a big bite out of every $2 win. Run it on **demo** for at least a week and check the "Today" line before using real money.
+Backtest results for tick scalpers are unreliable in MT4, because the tester generates fake ticks inside each M1 candle. A demo account is the real test.
+
 ## Long and short
 Both bots trade **both directions**:
 - **Long (BUY)** when the M15 trend is **UP** and EMA 9 crosses **above** EMA 21 on M5.
