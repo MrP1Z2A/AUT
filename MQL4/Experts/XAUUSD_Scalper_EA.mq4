@@ -5,7 +5,7 @@
 //|   close as soon as the trade shows a small $ profit.             |
 //+------------------------------------------------------------------+
 #property copyright "AUT"
-#property version   "1.20"
+#property version   "1.30"
 #property strict
 #property description "Gold (XAUUSD) momentum scalper. Watches price tick by tick: a sudden surge up opens a LONG,"
 #property description "a sudden drop opens a SHORT. Closes as soon as the trade is TakeProfitMoney in profit."
@@ -31,7 +31,9 @@ input int      TrendEMA             = 50;     // M5 EMA period for the trend fil
 
 input string   InpExitHeader        = "===== Quick exit =====";  // ----------
 input double   TakeProfitMoney      = 2.0;    // Close as soon as the trade is this much in profit (account currency)
-input double   BreakEvenMoney       = 1.0;    // Move stop to break-even once profit reaches this (0 = off)
+input double   BreakEvenMoney       = 1.0;    // Start protecting profit once the trade is this much up (0 = off)
+input double   LockProfitMoney      = 0.50;   // ...by moving the stop to lock in this much profit (0 = plain break-even)
+input double   TrailLockPct         = 50.0;   // ...then keep this % of the trade's profit as it grows (0 = off)
 input double   StopLossATR          = 2.0;    // Hard stop loss = ATR(M1) x this
 input double   MinStopPrice         = 2.0;    // Minimum stop loss ($ of gold price)
 input double   MaxStopPrice         = 8.0;    // Skip the trade if the stop would be wider than this ($, 0 = off)
@@ -535,22 +537,26 @@ void ManageTrades()
       // 2. Time limit
       if(MaxHoldSeconds > 0 && TimeCurrent() - OrderOpenTime() >= MaxHoldSeconds) { CloseTicket(ticket, "time limit"); continue; }
 
-      // 3. Break-even (covering commission)
+      // 3. Profit lock: once up BreakEvenMoney, move the stop so the trade can't close at 0.00.
+      //    Locks LockProfitMoney first, then TrailLockPct % of the current profit (stop only ever moves forward).
       if(BreakEvenMoney > 0 && net >= BreakEvenMoney && vpp > 0)
       {
-         double buf = (CommissionPerLot * lots) / (lots * vpp) + Point;
+         double lockMoney = MathMax(LockProfitMoney, net * TrailLockPct / 100.0);
+         if(lockMoney >= net) lockMoney = net * 0.5;                       // never place the stop at the current price
+         double dist    = (lockMoney + CommissionPerLot * lots) / (lots * vpp);
+         double minStep = MathMax(Point, 0.10 / (lots * vpp));            // move in steps of at least 0.10 profit
          RefreshRates();
          if(type == OP_BUY)
          {
-            double be = NormalizeDouble(open + buf, Digits);
-            if(sl < be - Point / 2 && Bid - be > stopLevel && OrderModify(ticket, open, be, tp, 0, clrNONE))
-               Notify(StringFormat("LONG #%d stop moved to break-even", ticket));
+            double ns = NormalizeDouble(open + dist, Digits);
+            if(ns >= sl + minStep && Bid - ns > stopLevel && OrderModify(ticket, open, ns, tp, 0, clrNONE) && sl < open)
+               Notify(StringFormat("LONG #%d profit locked: stop at %s (%s)", ticket, Px(ns), Money(lockMoney)));
          }
          else
          {
-            double be = NormalizeDouble(open - buf, Digits);
-            if((sl == 0 || sl > be + Point / 2) && be - Ask > stopLevel && OrderModify(ticket, open, be, tp, 0, clrNONE))
-               Notify(StringFormat("SHORT #%d stop moved to break-even", ticket));
+            double ns = NormalizeDouble(open - dist, Digits);
+            if((sl == 0 || ns <= sl - minStep) && ns - Ask > stopLevel && OrderModify(ticket, open, ns, tp, 0, clrNONE) && (sl == 0 || sl > open))
+               Notify(StringFormat("SHORT #%d profit locked: stop at %s (%s)", ticket, Px(ns), Money(lockMoney)));
          }
       }
    }
@@ -587,7 +593,7 @@ void CheckClosedTrades()
       string why;
       if(OrderTicket() == g_closeTicket)                              why = g_closeReason;
       else if(OrderTakeProfit() > 0 && MathAbs(cp - OrderTakeProfit()) <= tol) why = "take profit";
-      else if(OrderStopLoss() > 0 && MathAbs(cp - OrderStopLoss()) <= tol)     why = pl >= 0 ? "break-even stop" : "stop loss";
+      else if(OrderStopLoss() > 0 && MathAbs(cp - OrderStopLoss()) <= tol)     why = pl >= 0 ? "profit-lock stop" : "stop loss";
       else                                                            why = "closed manually";
 
       Notify(StringFormat("%s #%d CLOSED %s %s (%s) - balance %.2f",

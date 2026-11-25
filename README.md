@@ -24,7 +24,7 @@ A separate fast bot for gold. It doesn't wait for candles: it watches **every pr
 | **Go LONG** | Gold jumps **up** by at least 0.6 × ATR(M1) (and at least $1.00) within **10 seconds**, and price is still near the top |
 | **Go SHORT** | Gold drops **down** the same way, and price is still near the bottom |
 | **Take profit** | Closes **as soon as the trade is +$2.00 in profit** (`TakeProfitMoney`). A broker-side TP sits at the same level |
-| **Break-even** | At +$1.00 profit the stop moves to the entry price |
+| **Profit lock** | At +$1.00 the stop moves to lock in **+$0.50** (`LockProfitMoney`), then trails to keep 50% of the profit (`TrailLockPct`). A pullback closes the trade at a small profit instead of 0.00 |
 | **Stop loss** | Always set: 2 × ATR(M1), at least $2. Skips the trade if the stop would be wider than $8 |
 | **Time limit** | Closes any trade after 10 minutes, win or lose |
 | **Multiple trades** | Up to **4 at once: 2 LONG + 2 SHORT** can be open together. Each closes at its own +$2. Same-direction entries are at least 15 s apart, and the combined stop-loss risk of all open trades is capped at **15%** of balance (`MaxTotalRiskPercent`) |
