@@ -27,7 +27,8 @@ A separate fast bot for gold. It doesn't wait for candles: it watches **every pr
 | **Break-even** | At +$1.00 profit the stop moves to the entry price |
 | **Stop loss** | Always set: 2 × ATR(M1), at least $2. Skips the trade if the stop would be wider than $8 |
 | **Time limit** | Closes any trade after 10 minutes, win or lose |
-| **Safety** | 1 trade at a time, 30 s cooldown, pauses 30 min after 3 losses in a row, max 40 trades a day, stops for the day at −10%, max spread $0.40 |
+| **Multiple trades** | Up to **4 at once: 2 LONG + 2 SHORT** can be open together. Each closes at its own +$2. Same-direction entries are at least 15 s apart, and the combined stop-loss risk of all open trades is capped at **15%** of balance (`MaxTotalRiskPercent`) |
+| **Safety** | 30 s cooldown per direction after a close, pauses 30 min after 3 losses in a row, max 40 trades a day, stops for the day at −10%, max spread $0.40 |
 
 The live panel shows the size of the current surge against the size needed, the open trade's P/L against the target, and today's trades, wins and P/L.
 

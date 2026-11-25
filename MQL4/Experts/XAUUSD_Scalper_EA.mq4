@@ -5,7 +5,7 @@
 //|   close as soon as the trade shows a small $ profit.             |
 //+------------------------------------------------------------------+
 #property copyright "AUT"
-#property version   "1.10"
+#property version   "1.20"
 #property strict
 #property description "Gold (XAUUSD) momentum scalper. Watches price tick by tick: a sudden surge up opens a LONG,"
 #property description "a sudden drop opens a SHORT. Closes as soon as the trade is TakeProfitMoney in profit."
@@ -43,11 +43,15 @@ input double   FixedLot             = 0.0;    // Fixed lot size (0 = calculate f
 input bool     AllowMinLotOverRisk  = true;   // Use the minimum lot if the risk-based size is smaller...
 input double   MaxRiskAtMinLot      = 8.0;    // ...but never if the minimum lot would risk more than this %
 input double   CommissionPerLot     = 0.0;    // Round-turn commission per 1.00 lot (account currency)
-input int      MaxOpenTrades        = 1;      // Max trades open at once
+input int      MaxOpenTrades        = 4;      // Max trades open at once (longs + shorts together)
+input int      MaxLongTrades        = 2;      // Max LONG trades open at once
+input int      MaxShortTrades       = 2;      // Max SHORT trades open at once
+input int      EntryGapSeconds      = 15;     // Min seconds between two entries in the same direction
+input double   MaxTotalRiskPercent  = 15.0;   // Max combined stop-loss risk of all open trades (% of balance, 0 = off)
 input double   MaxDailyLossPercent  = 10.0;   // Stop for the day after this loss % (0 = off)
 input int      MaxConsecLosses      = 3;      // Pause after this many losses in a row (0 = off)
 input int      PauseMinutes         = 30;     // ...for this many minutes
-input int      CooldownSeconds      = 30;     // Wait after a trade closes before the next one
+input int      CooldownSeconds      = 30;     // Wait after a trade closes before the next one in the same direction
 input int      MaxTradesPerDay      = 40;     // Max trades per day (0 = unlimited)
 
 input string   InpFilterHeader      = "===== Filters =====";  // ----------
@@ -80,8 +84,8 @@ string   g_lastEvent = "-";
 int      g_known[];
 int      g_srvOffset = 0;
 datetime g_lastDraw = 0;
-datetime g_lastEntryBar = 0;
-datetime g_cooldownUntil = 0;
+datetime g_lastEntry[2];         // last entry time   [0] = LONG, [1] = SHORT
+datetime g_cooldown[2];          // cooldown end time [0] = LONG, [1] = SHORT
 datetime g_pauseUntil = 0;
 int      g_consecLosses = 0;
 int      g_closeTicket = -1;     // last ticket the EA closed itself, and why
@@ -96,6 +100,9 @@ bool DirAllowed(int dir)
 {
    return TradeDirection == DIR_BOTH || (dir > 0 && TradeDirection == DIR_LONG) || (dir < 0 && TradeDirection == DIR_SHORT);
 }
+int    Idx(int dir)  { return dir > 0 ? 0 : 1; }
+string DName(int dir) { return dir > 0 ? "LONG" : "SHORT"; }
+
 string DirText()
 {
    return TradeDirection == DIR_BOTH ? "LONG + SHORT" : (TradeDirection == DIR_LONG ? "LONG only" : "SHORT only");
@@ -125,7 +132,10 @@ int OnInit()
    if(TakeProfitMoney <= 0)                    { Alert("XAU_Scalp: TakeProfitMoney must be > 0."); return INIT_PARAMETERS_INCORRECT; }
    if(SurgeSeconds < 5 || ATRPeriod <= 0)      { Alert("XAU_Scalp: SurgeSeconds must be >= 5 and ATRPeriod > 0."); return INIT_PARAMETERS_INCORRECT; }
    if(StopLossATR <= 0 && MinStopPrice <= 0)   { Alert("XAU_Scalp: a stop loss is required."); return INIT_PARAMETERS_INCORRECT; }
-   if(MaxOpenTrades < 1)                       { Alert("XAU_Scalp: MaxOpenTrades must be at least 1."); return INIT_PARAMETERS_INCORRECT; }
+   if(MaxOpenTrades < 1 || MaxLongTrades < 0 || MaxShortTrades < 0)
+   { Alert("XAU_Scalp: MaxOpenTrades must be at least 1 and the long/short limits >= 0."); return INIT_PARAMETERS_INCORRECT; }
+   ArrayInitialize(g_lastEntry, 0);
+   ArrayInitialize(g_cooldown, 0);
 
    string sym = Symbol();
    StringToUpper(sym);
@@ -224,20 +234,18 @@ void TryEntry()
 {
    double move, needed, hold; bool enough;
    int dir = SurgeDirection(move, needed, hold, enough);
-   if(dir == 0) { if(CountOpenTrades() == 0) g_status = enough ? "Watching for a surge..." : "Collecting tick data..."; return; }
+   if(dir == 0) { if(CountOpenTrades(0) == 0) g_status = enough ? "Watching for a surge..." : "Collecting tick data..."; return; }
 
    string d = dir > 0 ? "UP" : "DOWN";
    if(!DirAllowed(dir)) { g_status = "Surge " + d + " - direction disabled"; return; }
    if(UseTrendFilter && TrendDirection() != dir) { g_status = "Surge " + d + " - against M5 trend"; return; }
 
    string reason = "";
-   if(!CanOpenNewTrade(reason)) { g_status = "Surge " + d + " - " + reason; return; }
-   if(iTime(NULL, PERIOD_M1, 0) == g_lastEntryBar) return;    // max one entry per M1 candle
+   if(!CanOpenNewTrade(dir, reason)) { g_status = "Surge " + d + " - " + reason; return; }
 
    if(OpenTrade(dir, move))
    {
-      g_lastEntryBar = iTime(NULL, PERIOD_M1, 0);
-      ResetTicks();
+      g_lastEntry[Idx(dir)] = TimeCurrent();
       SnapshotOpenTickets(g_known);
    }
 }
@@ -245,7 +253,7 @@ void TryEntry()
 int TradesToday()
 {
    datetime day = iTime(NULL, PERIOD_D1, 0);
-   int n = CountOpenTrades();
+   int n = CountOpenTrades(0);
    for(int i = OrdersHistoryTotal() - 1; i >= 0; i--)
    {
       if(!OrderSelect(i, SELECT_BY_POS, MODE_HISTORY)) continue;
@@ -258,17 +266,30 @@ string PauseReason()
 {
    if(TimeCurrent() < g_pauseUntil)
       return StringFormat("paused %d min after %d losses in a row", (int)((g_pauseUntil - TimeCurrent()) / 60) + 1, MaxConsecLosses);
-   if(TimeCurrent() < g_cooldownUntil)
-      return StringFormat("cooldown %ds", (int)(g_cooldownUntil - TimeCurrent()));
    if(MaxTradesPerDay > 0 && TradesToday() >= MaxTradesPerDay)
       return "max trades for today reached";
    return "";
 }
 
-bool CanOpenNewTrade(string &reason)
+// Why a new trade in this direction can't open right now ("" = it can)
+string DirBlock(int dir)
+{
+   int maxDir = dir > 0 ? MaxLongTrades : MaxShortTrades;
+   if(maxDir == 0)                                   return DName(dir) + "s disabled (limit 0)";
+   if(CountOpenTrades(dir) >= maxDir)                return StringFormat("%d/%d open", CountOpenTrades(dir), maxDir);
+   if(CountOpenTrades(0) >= MaxOpenTrades)           return StringFormat("total %d/%d open", CountOpenTrades(0), MaxOpenTrades);
+   int i = Idx(dir);
+   if(TimeCurrent() < g_cooldown[i])                 return StringFormat("cooldown %ds", (int)(g_cooldown[i] - TimeCurrent()));
+   if(TimeCurrent() < g_lastEntry[i] + EntryGapSeconds)
+      return StringFormat("next in %ds", (int)(g_lastEntry[i] + EntryGapSeconds - TimeCurrent()));
+   return "";
+}
+
+bool CanOpenNewTrade(int dir, string &reason)
 {
    if(!IsTradeAllowed())                  { reason = "AutoTrading is off"; return false; }
-   if(CountOpenTrades() >= MaxOpenTrades) { reason = "trade already open"; return false; }
+   string b = DirBlock(dir);
+   if(b != "")                            { reason = DName(dir) + " " + b; return false; }
    if(DailyLossHit())
    {
       reason = "daily loss limit hit";
@@ -354,15 +375,49 @@ bool DailyLossHit()
 }
 
 //========================== ORDERS =================================
-int CountOpenTrades()
+// dir: 0 = all, 1 = longs, -1 = shorts
+int CountOpenTrades(int dir)
 {
    int n = 0;
    for(int i = OrdersTotal() - 1; i >= 0; i--)
    {
       if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) continue;
-      if(OrderSymbol() == Symbol() && OrderMagicNumber() == MagicNumber && OrderType() <= OP_SELL) n++;
+      if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber || OrderType() > OP_SELL) continue;
+      if(dir == 0 || (dir > 0 && OrderType() == OP_BUY) || (dir < 0 && OrderType() == OP_SELL)) n++;
    }
    return n;
+}
+
+// Money lost if every open trade hit its stop now (stops at break-even or better count as 0)
+double OpenRisk()
+{
+   double vpp = ValuePerPrice(), risk = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) continue;
+      if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber || OrderType() > OP_SELL) continue;
+      double sl = OrderStopLoss();
+      double dist = (sl == 0) ? StopDistance()
+                  : (OrderType() == OP_BUY ? OrderOpenPrice() - sl : sl - OrderOpenPrice());
+      if(dist > 0) risk += dist * vpp * OrderLots();
+      risk += CommissionPerLot * OrderLots();
+   }
+   return risk;
+}
+
+// dir: 1 = longs, -1 = shorts. Returns combined P/L and sets count.
+double OpenPL(int dir, int &count)
+{
+   double pl = 0; count = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) continue;
+      if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber || OrderType() > OP_SELL) continue;
+      if((dir > 0 && OrderType() != OP_BUY) || (dir < 0 && OrderType() != OP_SELL)) continue;
+      pl += OrderProfit() + OrderSwap() + OrderCommission();
+      count++;
+   }
+   return pl;
 }
 
 bool IsRetryable(int err)
@@ -379,6 +434,11 @@ bool OpenTrade(int dir, double surgeMove)
 
    double lots = CalcLots(slDist);
    if(lots <= 0) { g_status = "Surge skipped - account too small for minimum lot"; return false; }
+
+   double newRisk = lots * (slDist * ValuePerPrice() + CommissionPerLot);
+   double cap     = AccountBalance() * MaxTotalRiskPercent / 100.0;
+   if(MaxTotalRiskPercent > 0 && OpenRisk() + newRisk > cap)
+   { g_status = StringFormat("Surge skipped - total risk would be %.2f (max %.2f)", OpenRisk() + newRisk, cap); return false; }
 
    // broker-side take profit at the money target (filled instantly by the broker, even between ticks)
    double vpp    = ValuePerPrice();
@@ -540,8 +600,7 @@ void CheckClosedTrades()
          g_consecLosses = 0;
          Notify(StringFormat("%d losses in a row - pausing for %d minutes", MaxConsecLosses, PauseMinutes));
       }
-      g_cooldownUntil = TimeCurrent() + CooldownSeconds;
-      ResetTicks();
+      g_cooldown[OrderType() == OP_BUY ? 0 : 1] = TimeCurrent() + CooldownSeconds;
    }
    ArrayResize(g_known, ArraySize(cur));
    for(int i = 0; i < ArraySize(cur); i++) g_known[i] = cur[i];
@@ -620,7 +679,7 @@ void DrawPanel()
 {
    int row = 0;
    bool canTrade = IsTradeAllowed() && IsExpertEnabled();
-   PBox(30 + 15 * P_ROW + 8);
+   PBox(30 + 17 * P_ROW + 8);
    PLabel("hdr", P_X + 8, P_Y + 6, "XAUUSD SCALPER", clrWhite, 11, "Arial Bold");
    PLabel("run", P_X + 170, P_Y + 8,
           canTrade ? "RUNNING - live " + (IsDemo() ? "(DEMO)" : "(REAL MONEY)") : "AUTOTRADING OFF",
@@ -645,24 +704,22 @@ void DrawPanel()
    bool dl = DailyLossHit();
    PRow(row++, dl ? 0 : 1, "Daily loss limit", dl ? "HIT - stopped for today" : StringFormat("OK  (limit %.0f%%)", MaxDailyLossPercent));
    string pr = PauseReason();
-   PRow(row++, pr == "" ? 1 : 0, "Ready", pr == "" ? "yes" : pr);
-   int open = CountOpenTrades();
-   PRow(row++, open < MaxOpenTrades ? 1 : 0, "Trade slots", StringFormat("%d / %d open", open, MaxOpenTrades));
+   PRow(row++, pr == "" ? 1 : 0, "Not paused", pr == "" ? "yes" : pr);
+   string lb = DirAllowed(1)  ? DirBlock(1)  : "disabled";
+   string sb = DirAllowed(-1) ? DirBlock(-1) : "disabled";
+   PRow(row++, (lb == "" || sb == "") ? 1 : 0, "Slots",
+        "LONG " + (lb == "" ? "ready" : lb) + " | SHORT " + (sb == "" ? "ready" : sb));
 
-   // --- open trade
-   string ot = "none"; color oc = clrWhite;
-   for(int i = OrdersTotal() - 1; i >= 0; i--)
-   {
-      if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) continue;
-      if(OrderSymbol() != Symbol() || OrderMagicNumber() != MagicNumber || OrderType() > OP_SELL) continue;
-      double pl = OrderProfit() + OrderSwap() + OrderCommission();
-      int age = (int)(TimeCurrent() - OrderOpenTime());
-      ot = StringFormat("%s %.2f  P/L %s / target %s  (%d:%02d)", OrderType() == OP_BUY ? "LONG" : "SHORT",
-                        OrderLots(), Money(pl), Money(TakeProfitMoney), age / 60, age % 60);
-      oc = pl >= 0 ? clrLimeGreen : clrTomato;
-      break;
-   }
-   PRow(row++, -1, "Open trade", ot, oc);
+   // --- open trades
+   int nl, ns;
+   double pll = OpenPL(1, nl), pls = OpenPL(-1, ns);
+   PRow(row++, -1, "Open LONGs",  nl == 0 ? "none" : StringFormat("%d trade(s)  P/L %s  (each closes at %s)", nl, Money(pll), Money(TakeProfitMoney)),
+        pll >= 0 ? clrLimeGreen : clrTomato);
+   PRow(row++, -1, "Open SHORTs", ns == 0 ? "none" : StringFormat("%d trade(s)  P/L %s  (each closes at %s)", ns, Money(pls), Money(TakeProfitMoney)),
+        pls >= 0 ? clrLimeGreen : clrTomato);
+   double orisk = OpenRisk();
+   PRow(row++, -1, "Open risk", StringFormat("%.2f of max %.2f %s  (%.1f%% of balance)", orisk,
+        AccountBalance() * MaxTotalRiskPercent / 100.0, AccountCurrency(), orisk / AccountBalance() * 100.0));
    PRow(row++, -1, "Directions", DirText() + (UseTrendFilter ? "  (with M5 trend)" : "  (follows the surge)"));
 
    // --- next trade preview
@@ -687,7 +744,7 @@ void DrawPanel()
    PRow(row++, -1, "Status", g_status);
    PRow(row++, -1, "Last event", g_lastEvent);
    PLabel("foot", P_X + 8, P_Y + 30 + row * P_ROW + 2,
-          "A trade opens the moment the first 7 lines are all green. Closes at the profit target.", clrGray, 8, "Arial");
+          "A trade opens when the first 7 lines are green. Each trade closes at its own profit target.", clrGray, 8, "Arial");
    ChartRedraw();
 }
 //+------------------------------------------------------------------+
