@@ -59,6 +59,18 @@ To trade small accounts anyway, set `AllowMinLotOverRisk = true`. The bot then u
 
 > Open the M5 and M15 charts of the symbol once so MT4 downloads their history.
 
+## Watching the bot in real time (EURUSD bot v1.10)
+**Live panel on the chart.** It updates every second:
+- A green ✔ or red ✘ for each trade condition: M15 trend, M5 EMA cross, RSI, spread, trading hours, daily loss limit and trade slots. A trade opens when all 7 are green on a new M5 candle.
+- The open trade with its live P/L, the size of the next trade, a countdown to the next M5 check, and the last event.
+
+**Push notifications to your phone** (`PushNotifications` = true). You get an alert when the bot starts, opens a trade, moves the stop to break-even, closes a trade (with profit or loss), hits the daily limit, or an order fails. To set it up:
+1. Install the **MetaTrader 4** app on your phone. Go to **Settings → Messages** and copy your **MetaQuotes ID**.
+2. In desktop MT4, go to **Tools → Options → Notifications**. Tick **Enable Push Notifications**, paste the ID, and click **Test**.
+3. You can also log into the same account in the phone app to watch trades live. The bot itself keeps running on the PC.
+
+**Watch it trade history quickly.** In the Strategy Tester (Ctrl+R), tick **Visual mode** and press Start. Trades appear on the chart as it replays past prices.
+
 ## Settings you will most likely change
 | Input | Default | Notes |
 |-------|---------|-------|
